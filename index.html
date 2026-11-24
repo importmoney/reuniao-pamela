@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sala de Reuniões · Pâmela Pissutti</title>
+<meta name="description" content="Sala de videochamada da Pâmela Pissutti.">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#411e06">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" type="image/jpeg" sizes="32x32" href="img/icone-32.jpg">
+<link rel="apple-touch-icon" href="img/icone-180.jpg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Montserrat:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="css/style.css?v=1">
+<script src="js/config.js?v=1"></script>
+<script type="module" src="js/app.js?v=1"></script>
+</head>
+<body>
+
+<!-- Carregando -->
+<section id="v-boot" class="tela tela-centro">
+  <div class="spinner" aria-hidden="true"></div>
+  <p class="mudo">Abrindo a sala…</p>
+</section>
+
+<!-- Início (anfitriã) -->
+<section id="v-home" class="tela" hidden>
+  <div class="coluna">
+    <header class="marca">
+      <img src="img/icone-180.jpg" alt="" width="56" height="56" class="marca-logo">
+      <div>
+        <h1>Sala de Reuniões</h1>
+        <p class="mudo">Pâmela Pissutti · Consultora do Sono Infantil</p>
+      </div>
+    </header>
+
+    <div id="home-login" class="cartao">
+      <h2>Sou a anfitriã</h2>
+      <p class="mudo">Entre com a senha da anfitriã para criar reuniões e receber as pessoas na sala.</p>
+      <form id="form-login" autocomplete="on">
+        <label class="campo">
+          <span>Senha da anfitriã</span>
+          <input id="login-senha" type="password" autocomplete="current-password" required>
+        </label>
+        <p id="login-erro" class="erro" hidden></p>
+        <button class="botao primario" type="submit">Entrar</button>
+      </form>
+      <p class="pequeno mudo">Recebeu o link de uma reunião? É só abri-lo — não precisa de senha.</p>
+    </div>
+
+    <div id="home-painel" hidden>
+      <div class="cartao">
+        <h2>Criar reunião</h2>
+        <form id="form-criar" autocomplete="off">
+          <label class="campo">
+            <span>Nome da reunião <em>(opcional)</em></span>
+            <input id="criar-titulo" type="text" maxlength="80" placeholder="Ex.: Mentoria de sono — Maria">
+          </label>
+          <label class="check">
+            <input id="criar-fixa" type="checkbox">
+            <span>Link fixo, que sempre serve para este tipo de reunião<br><small class="mudo">Use este para colocar nas Reuniões do Wix.</small></span>
+          </label>
+          <label class="campo" id="criar-slug-campo" hidden>
+            <span>Nome do link fixo</span>
+            <div class="prefixo"><i id="criar-prefixo">…/?sala=</i><input id="criar-slug" type="text" maxlength="40" placeholder="consulta" autocapitalize="none" spellcheck="false"></div>
+            <small class="mudo">Letras minúsculas, números e hífen. Ex.: consulta, mentoria, clube-de-maes</small>
+          </label>
+          <p id="criar-erro" class="erro" hidden></p>
+          <button class="botao primario" type="submit">Criar reunião</button>
+        </form>
+      </div>
+
+      <div class="cartao">
+        <h2>Suas reuniões</h2>
+        <p id="lista-vazia" class="mudo" hidden>Você ainda não criou nenhuma reunião.</p>
+        <ul id="lista-salas" class="lista-salas"></ul>
+      </div>
+
+      <p class="centro"><button id="btn-sair-conta" class="link" type="button">Sair deste aparelho</button></p>
+    </div>
+  </div>
+</section>
+
+<!-- Antes de entrar -->
+<section id="v-lobby" class="tela" hidden>
+  <div class="coluna larga">
+    <header class="marca pequena">
+      <img src="img/icone-180.jpg" alt="" width="40" height="40" class="marca-logo">
+      <div>
+        <h1 id="lobby-titulo">Sala de Reuniões</h1>
+        <p class="mudo">Pâmela Pissutti</p>
+      </div>
+    </header>
+
+    <div id="lobby-aviso-app" class="aviso" hidden>
+      <strong>Abra no navegador do celular.</strong>
+      <span>Este aplicativo (Instagram, Facebook etc.) bloqueia câmera e microfone. Toque nos três pontinhos e escolha “Abrir no navegador”, ou copie o link e cole no Safari/Chrome.</span>
+      <button id="lobby-copiar-link" class="botao pequeno" type="button">Copiar link</button>
+    </div>
+
+    <div class="lobby-grade">
+      <div class="lobby-previa">
+        <div class="previa-caixa">
+          <video id="lobby-video" autoplay playsinline muted></video>
+          <div id="lobby-avatar" class="avatar-grande" hidden></div>
+          <div class="previa-botoes">
+            <button id="lobby-mic" class="redondo" type="button" aria-label="Microfone"></button>
+            <button id="lobby-cam" class="redondo" type="button" aria-label="Câmera"></button>
+          </div>
+        </div>
+        <p id="lobby-midia-erro" class="aviso" hidden></p>
+        <details id="dispositivos" class="dispositivos">
+          <summary>Trocar câmera ou microfone</summary>
+          <div class="seletores">
+            <label class="campo mini"><span>Câmera</span><select id="sel-cam"></select></label>
+            <label class="campo mini"><span>Microfone</span><select id="sel-mic"></select></label>
+          </div>
+        </details>
+      </div>
+
+      <div class="lobby-form cartao">
+        <p id="lobby-gravacao" class="rec-aviso" hidden>● Esta reunião está sendo gravada.</p>
+        <p id="lobby-ausente" class="mudo" hidden>A anfitriã ainda não abriu a sala.</p>
+        <label class="campo">
+          <span>Seu nome</span>
+          <input id="lobby-nome" type="text" maxlength="40" autocomplete="name" placeholder="Como quer ser chamada(o)?">
+        </label>
+        <p id="lobby-erro" class="erro" hidden></p>
+        <button id="lobby-entrar" class="botao primario grande" type="button">Pedir para entrar</button>
+        <p id="lobby-explica" class="pequeno mudo">A anfitriã vai receber o seu pedido e permitir a sua entrada.</p>
+
+        <div id="lobby-anfitria" class="separa">
+          <button id="lobby-anfitria-link" class="link" type="button">Sou a anfitriã</button>
+          <form id="lobby-login" hidden autocomplete="on">
+            <label class="campo">
+              <span>Senha da anfitriã</span>
+              <input id="lobby-senha" type="password" autocomplete="current-password">
+            </label>
+            <p id="lobby-login-erro" class="erro" hidden></p>
+            <button class="botao" type="submit">Confirmar</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Sala de espera -->
+<section id="v-espera" class="tela tela-centro" hidden>
+  <div class="cartao centro estreito">
+    <div class="spinner" aria-hidden="true"></div>
+    <h2>Aguarde um instante</h2>
+    <p id="espera-texto">A anfitriã vai permitir a sua entrada em breve.</p>
+    <p id="espera-gravacao" class="rec-aviso" hidden>● Esta reunião está sendo gravada.</p>
+    <button id="espera-cancelar" class="botao" type="button">Cancelar</button>
+  </div>
+</section>
+
+<!-- Chamada -->
+<section id="v-call" class="tela chamada" hidden>
+  <header class="topo">
+    <div class="topo-titulo"><strong id="call-titulo">Reunião</strong><span id="call-timer" class="mudo">00:00</span></div>
+    <div id="badge-rec" class="badge-rec" hidden><i></i> Gravando</div>
+    <button id="b-convite" class="topo-botao" type="button" aria-label="Copiar link da reunião" hidden></button>
+  </header>
+  <div id="faixa" class="faixa" hidden></div>
+  <main id="palco" class="palco">
+    <div id="stage" class="stage" hidden></div>
+    <div id="grid" class="grid"></div>
+  </main>
+  <aside id="painel" class="painel" hidden aria-label="Participantes">
+    <div class="painel-topo"><h3>Participantes</h3><button id="painel-fechar" class="topo-botao" type="button" aria-label="Fechar"></button></div>
+    <div id="painel-espera" hidden>
+      <h4>Querem entrar <button id="painel-aceitar-todos" class="botao pequeno" type="button">Aceitar todos</button></h4>
+      <ul id="lista-espera" class="lista-pessoas"></ul>
+    </div>
+    <h4>Na reunião</h4>
+    <ul id="lista-dentro" class="lista-pessoas"></ul>
+    <div id="painel-anfitria" class="painel-rodape" hidden>
+      <label class="check"><input id="chk-trancar" type="checkbox"><span>Trancar sala<br><small class="mudo">Ninguém novo consegue pedir para entrar.</small></span></label>
+      <button id="painel-copiar" class="botao pequeno" type="button">Copiar link da reunião</button>
+    </div>
+  </aside>
+  <footer class="barra">
+    <button id="b-mic" class="b" type="button"><span class="ic"></span><span class="rot">Microfone</span></button>
+    <button id="b-cam" class="b" type="button"><span class="ic"></span><span class="rot">Câmera</span></button>
+    <button id="b-tela" class="b" type="button"><span class="ic"></span><span class="rot">Compartilhar</span></button>
+    <button id="b-trocar" class="b" type="button" hidden><span class="ic"></span><span class="rot">Virar</span></button>
+    <button id="b-rec" class="b" type="button" hidden><span class="ic"></span><span class="rot">Gravar</span></button>
+    <button id="b-pessoas" class="b" type="button"><span class="ic"></span><span class="rot">Pessoas</span><em id="pessoas-n" hidden>0</em></button>
+    <button id="b-sair" class="b sair" type="button"><span class="ic"></span><span class="rot">Sair</span></button>
+  </footer>
+  <div id="som-faixa" class="som-faixa" hidden><button id="som-ativar" class="botao primario" type="button">Toque para ativar o som</button></div>
+</section>
+
+<!-- Fim -->
+<section id="v-fim" class="tela tela-centro" hidden>
+  <div class="cartao centro estreito">
+    <h2 id="fim-titulo">Reunião encerrada</h2>
+    <p id="fim-texto" class="mudo"></p>
+    <button id="fim-voltar" class="botao primario" type="button">Voltar ao início</button>
+  </div>
+</section>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="modal-fundo" class="modal-fundo" hidden>
+  <div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-titulo">
+    <h3 id="modal-titulo"></h3>
+    <div id="modal-corpo"></div>
+    <div id="modal-botoes" class="modal-botoes"></div>
+  </div>
+</div>
+
+<noscript><p style="padding:24px;font-family:sans-serif">Ative o JavaScript do navegador para usar a sala de reuniões.</p></noscript>
+</body>
+</html>
