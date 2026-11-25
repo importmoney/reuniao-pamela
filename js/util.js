@@ -76,7 +76,18 @@ export function melhorGrade(n, largura, altura, razao) {
 // bloqueia câmera e microfone (principalmente no iPhone).
 export function navegadorEmbutido() {
   const ua = navigator.userAgent || '';
-  return /(FBAN|FBAV|FB_IAB|Instagram|MicroMessenger|TikTok|musical_ly|BytedanceWebview|Snapchat|Pinterest|LinkedInApp|Line\/|GSA\/)/i.test(ua);
+  if (/(FBAN|FBAV|FB_IAB|Instagram|MicroMessenger|TikTok|musical_ly|BytedanceWebview|Snapchat|Pinterest|LinkedInApp|Line\/|GSA\/)/i.test(ua)) return true;
+  // iPhone/iPad dentro de outro aplicativo (WhatsApp, e-mail, redes sociais…): o navegador embutido
+  // não traz "Safari/" no identificador. O Safari de verdade, o Chrome e o Firefox do iPhone trazem.
+  if (/(iPhone|iPad|iPod)/.test(ua) && /AppleWebKit/.test(ua) && !/Safari\//.test(ua)) return true;
+  // Android: navegador embutido (WebView)
+  if (/; wv\)/.test(ua)) return true;
+  return false;
+}
+
+export function ehIOS() {
+  const ua = navigator.userAgent || '';
+  return /(iPhone|iPad|iPod)/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
 
 export function ehCelular() {
@@ -94,6 +105,11 @@ export function suportaCompartilharTela() {
 
 // Aviso sonoro curto (quando alguém pede para entrar).
 let ctxSom = null;
+// Contexto de áudio compartilhado (criado dentro de um toque, para o iPhone liberar o som).
+export function contextoDeSom() {
+  liberarSom();
+  return ctxSom;
+}
 export function liberarSom() {
   try {
     const AC = window.AudioContext || window.webkitAudioContext;

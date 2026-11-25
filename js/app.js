@@ -1,8 +1,8 @@
 // Sala de Reuniões — Pâmela Pissutti
 // Orquestra as telas: início (anfitriã), antes de entrar, espera, chamada e fim.
 import {
-  $, $$, mostrar, texto, inicial, formatarTempo, gerarChave, copiar, navegadorEmbutido, ehCelular,
-  suporteCompleto, suportaCompartilharTela, liberarSom, bip, aviso, janela, melhorGrade,
+  $, $$, mostrar, texto, inicial, formatarTempo, gerarChave, copiar, navegadorEmbutido, ehCelular, ehIOS,
+  suporteCompleto, suportaCompartilharTela, liberarSom, contextoDeSom, bip, aviso, janela, melhorGrade,
 } from './util.js';
 import { icone } from './icons.js';
 import { api, sessao, urlWs, linkDaSala, mensagemDeErro } from './api.js';
@@ -64,9 +64,86 @@ const S = {
   encerrando: false,
   wakeLock: null,
   shareResolve: null,
+  pool: [], // elementos <video> "destravados" no toque de entrar (iPhone só toca som se houve toque)
+  eventos: [], // últimos acontecimentos, para o relatório de suporte
+  erroMidia: null,
+  somBloqueado: 0,
 };
 
 const eAnfitria = () => S.papel === 'host';
+
+// Anota o que acontece (só na memória deste aparelho) para o botão "Copiar relatório".
+function registrar(txt) {
+  const t = new Date();
+  const dois = (n) => (n < 10 ? '0' + n : '' + n);
+  S.eventos.push(dois(t.getHours()) + ':' + dois(t.getMinutes()) + ':' + dois(t.getSeconds()) + ' ' + txt);
+  if (S.eventos.length > 80) S.eventos.shift();
+}
+
+// Texto curto, em português, que a pessoa pode colar numa conversa com a Pâmela.
+async function montarRelatorio() {
+  const linhas = [];
+  const add = (k, v) => linhas.push(k + ': ' + v);
+  add('Relatório da Sala de Reuniões', new Date().toLocaleString('pt-BR'));
+  add('Sala', S.salaId || '(início)');
+  add('Aparelho', navigator.userAgent);
+  add('Idioma / tela', (navigator.language || '?') + ' / ' + window.screen.width + 'x' + window.screen.height + ' (janela ' + window.innerWidth + 'x' + window.innerHeight + ')');
+  add('Site seguro (https)', window.isSecureContext);
+  add('Navegador embutido em outro app', navegadorEmbutido());
+  add('Recursos', 'WebRTC=' + !!window.RTCPeerConnection + ' câmera=' + !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) + ' WebSocket=' + !!window.WebSocket);
+  add('Erro ao abrir a câmera/microfone', S.erroMidia || 'nenhum');
+  const trilhas = S.fluxoLocal ? S.fluxoLocal.getTracks().map((t) => t.kind + ':' + t.readyState + (t.enabled ? '' : ':desligada')).join(', ') : 'sem câmera/microfone';
+  add('Câmera/microfone locais', trilhas);
+  add('Papel / meu id', S.papel + ' / ' + (S.meuId || '-'));
+  add('Sinalizador', S.sig && S.sig.ws ? 'estado ' + S.sig.ws.readyState + (S.reconectando ? ' (reconectando)' : '') : 'sem conexão');
+  add('Som bloqueado pelo aparelho (vezes)', S.somBloqueado);
+  const vids = Array.from(document.querySelectorAll('#grid video, #stage video')).map((v, i) => i + ': pausado=' + v.paused + ' mudo=' + v.muted + ' pronto=' + v.readyState + ' largura=' + v.videoWidth);
+  add('Vídeos na tela', vids.length ? vids.join(' | ') : 'nenhum');
+  if (S.malha) {
+    try {
+      add('Conexões', JSON.stringify(await S.malha.relatorio()));
+    } catch (e) {
+      add('Conexões', 'erro ao ler');
+    }
+  } else {
+    add('Conexões', 'ainda não entrou na chamada');
+  }
+  linhas.push('--- últimos acontecimentos ---');
+  return linhas.concat(S.eventos).join('\n');
+}
+
+async function copiarRelatorio() {
+  const relatorio = await montarRelatorio();
+  if (await copiar(relatorio)) {
+    aviso('Relatório copiado. Cole numa conversa com a Pâmela.', { tipo: 'bom', ms: 6000 });
+  } else {
+    await janela('Relatório para o suporte', [relatorio.slice(0, 1800)], [{ rotulo: 'Fechar', valor: true, primario: true }]);
+  }
+}
+
+// iPhone: o som e o vídeo da outra pessoa só tocam em elementos que já foram "tocados" por um toque.
+// Criamos alguns agora (dentro do toque em "Entrar") e os usamos depois nos quadros da chamada.
+function prepararElementosDeMidia() {
+  try {
+    const ctx = contextoDeSom();
+    const destino = ctx && ctx.createMediaStreamDestination ? ctx.createMediaStreamDestination() : null;
+    S.pool = [];
+    for (let i = 0; i < 8; i++) {
+      const v = document.createElement('video');
+      v.autoplay = true;
+      v.playsInline = true;
+      v.setAttribute('playsinline', '');
+      v.setAttribute('webkit-playsinline', '');
+      if (destino) v.srcObject = destino.stream;
+      const p = v.play();
+      if (p && p.catch) p.catch(() => {});
+      S.pool.push(v);
+    }
+    registrar('elementos de mídia preparados: ' + S.pool.length);
+  } catch (e) {
+    registrar('não consegui preparar os elementos de mídia: ' + e.message);
+  }
+}
 
 function linkBase() {
   return linkDaSala('').replace(/\?sala=$/, '');
@@ -311,8 +388,14 @@ async function abrirPreviaInterno(camId, micId) {
     else if (!r.fluxo.getAudioTracks().length) avisoMidia('Não encontramos um microfone. Você poderá ouvir e ver, mas não falar.');
   } else {
     const nome = r.erro && r.erro.name;
+    S.erroMidia = nome ? nome + (r.erro.message ? ' — ' + r.erro.message : '') : 'desconhecido';
+    registrar('erro ao abrir câmera/microfone: ' + S.erroMidia);
     if (nome === 'NotAllowedError' || nome === 'SecurityError') {
-      avisoMidia('A câmera e o microfone estão bloqueados. Toque no ícone de cadeado ou de câmera ao lado do endereço do site, permita o acesso e toque em “Tentar de novo”. Você também pode entrar só para assistir e ouvir.', true);
+      if (ehIOS()) {
+        avisoMidia('A câmera e o microfone não foram liberados. No iPhone, o Safari só pergunta de novo se você abrir a página outra vez: toque em “Recarregar” e, quando aparecer o pedido, escolha “Permitir”. Se não aparecer, toque em “aA” na barra de endereço, depois em “Ajustes do site” e libere a Câmera e o Microfone. Você também pode entrar só para assistir e ouvir.', 'recarregar');
+      } else {
+        avisoMidia('A câmera e o microfone estão bloqueados. Toque no ícone de cadeado ou de câmera ao lado do endereço do site, permita o acesso e toque em “Tentar de novo”. Você também pode entrar só para assistir e ouvir.', true);
+      }
     } else if (nome === 'NotReadableError') {
       avisoMidia('A câmera ou o microfone estão sendo usados por outro programa. Feche-o e toque em “Tentar de novo”.', true);
     } else {
@@ -336,7 +419,9 @@ async function abrirPreviaInterno(camId, micId) {
 function avisoMidia(msg, comBotao) {
   const el = $('#lobby-midia-erro');
   el.textContent = msg + ' ';
-  if (comBotao) {
+  if (comBotao === 'recarregar') {
+    el.appendChild(botaoPequeno('Recarregar', () => location.reload(), true));
+  } else if (comBotao) {
     const b = botaoPequeno('Tentar de novo', () => abrirPrevia($('#sel-cam').value || undefined, $('#sel-mic').value || undefined));
     el.appendChild(b);
   }
@@ -457,6 +542,8 @@ async function entrar() {
   S.nome = nome.slice(0, 40);
   try { localStorage.setItem('sala.nome', S.nome); } catch (e) {}
   liberarSom();
+  prepararElementosDeMidia(); // precisa acontecer aqui, dentro do toque (iPhone)
+  registrar('toque em entrar');
   $('#lobby-entrar').disabled = true;
 
   // espera a câmera/microfone terminarem de abrir (até 6 s; se a pessoa ainda estiver
@@ -502,7 +589,8 @@ function chaveDaAba() {
   }
 }
 
-function aoEstadoDoSinal(estado) {
+function aoEstadoDoSinal(estado, codigo) {
+  registrar('sinalizador: ' + estado + (codigo ? ' (' + codigo + ')' : ''));
   if (estado === 'reconectando') {
     S.reconectando = true;
     atualizarFaixa();
@@ -527,6 +615,7 @@ function receber(m) {
 }
 
 function tratar(m) {
+  if (m.t !== 'signal' && m.t !== 'state') registrar('servidor: ' + m.t);
   switch (m.t) {
     case 'waiting': return aoEsperar(m);
     case 'welcome': return aoBoasVindas(m);
@@ -618,13 +707,19 @@ function iniciarChamada() {
     local: () => ({ cam: S.fluxoLocal, tela: S.tela }),
     aoMudar: agendarRender,
     aoEstadoLigacao: agendarRender,
+    registrar,
   });
+  registrar('entrou na chamada como ' + S.papel + ' com ' + S.pares.size + ' pessoa(s)');
   S.pares.forEach((p) => S.malha.ligar(p.id, true));
   ir('call');
   montarBarra();
   S.inicioChamada = Date.now();
   clearInterval(S.relogio);
-  S.relogio = setInterval(() => texto($('#call-timer'), formatarTempo((Date.now() - S.inicioChamada) / 1000)), 1000);
+  let tic = 0;
+  S.relogio = setInterval(() => {
+    texto($('#call-timer'), formatarTempo((Date.now() - S.inicioChamada) / 1000));
+    if (++tic % 5 === 0) agendarRender(); // reavalia "conectando/falhou" com o passar do tempo
+  }, 1000);
   texto($('#call-titulo'), S.titulo);
   mostrar($('#b-convite'), eAnfitria());
   mostrar($('#b-rec'), eAnfitria());
@@ -1057,12 +1152,17 @@ function forcarTiles() {
 function criarTile(id, ehEu) {
   const el = document.createElement('div');
   el.className = 'tile' + (ehEu ? ' eu' : '');
-  const v = document.createElement('video');
+  // usa um elemento já "destravado" no toque de entrar (essencial no iPhone); senão cria um novo
+  let v = !ehEu && S.pool.length ? S.pool.pop() : null;
+  if (!v) {
+    v = document.createElement('video');
+    v.autoplay = true;
+    v.playsInline = true;
+    v.setAttribute('playsinline', '');
+    v.setAttribute('webkit-playsinline', '');
+  }
+  v.muted = !!ehEu;
   v.autoplay = true;
-  v.playsInline = true;
-  v.setAttribute('playsinline', '');
-  v.setAttribute('webkit-playsinline', '');
-  if (ehEu) v.muted = true;
   const av = document.createElement('div');
   av.className = 'avatar';
   av.appendChild(document.createElement('span'));
@@ -1073,12 +1173,41 @@ function criarTile(id, ehEu) {
   const txt = document.createElement('span');
   nome.append(micEl, txt);
   el.append(v, av, nome);
-  return { id, el, v, av, micEl, txt, fluxo: undefined, temVideo: false };
+  return { id, el, v, av, micEl, txt, fluxo: undefined, temVideo: false, criadoEm: Date.now() };
 }
 
+// Toca o vídeo. Se o aparelho (iPhone) bloquear o som por falta de toque, mostra a imagem
+// sem som e pede um toque na tela para liberar o áudio.
 function tocar(v) {
   const p = v.play();
-  if (p && p.catch) p.catch(() => mostrar($('#som-faixa'), true));
+  if (p && p.catch) {
+    p.catch((e) => {
+      S.somBloqueado++;
+      registrar('som bloqueado pelo aparelho (' + ((e && e.name) || 'erro') + ')');
+      if (!v.muted) {
+        v.muted = true;
+        v.dataset.mudoPorBloqueio = '1';
+        const q = v.play();
+        if (q && q.catch) q.catch(() => {});
+      }
+      mostrar($('#som-faixa'), true);
+    });
+  }
+}
+
+// Depois de um toque do usuário: liga o som dos vídeos que foram silenciados à força e mostra tudo.
+function liberarSomDosVideos() {
+  $$('#grid video, #stage video').forEach((v) => {
+    if (v.dataset.mudoPorBloqueio === '1') {
+      v.muted = false;
+      delete v.dataset.mudoPorBloqueio;
+    }
+    const p = v.play();
+    if (p && p.catch) p.catch(() => {});
+  });
+  mostrar($('#som-faixa'), false);
+  liberarSom();
+  registrar('toque para ativar o som');
 }
 
 function fluxoCamera(id) {
@@ -1146,7 +1275,13 @@ function renderizar() {
       t.txt.textContent = p.name + (p.role === 'host' ? ' · anfitriã' : '');
       t.micEl.innerHTML = p.mic === false ? icone('micOff') : '';
       const est = S.malha.estado(id);
-      t.el.classList.toggle('sem-conexao', est !== 'connected' && !f);
+      // Mesmo que a descrição do vídeo já tenha chegado, sem conexão de verdade o quadro fica preto:
+      // por isso olhamos o estado real da conexão, não se já existe uma transmissão.
+      const semConexao = est !== 'connected';
+      const demorou = S.malha.haQuanto(id) > 20000;
+      t.el.classList.toggle('sem-conexao', semConexao);
+      // a conexão não completa (ou caiu e não volta): avisa, em vez de "Conectando…" para sempre
+      t.el.classList.toggle('falhou', semConexao && (est === 'failed' || demorou));
     }
   });
 
@@ -1222,6 +1357,7 @@ function renderizar() {
   atualizarBotoes();
   renderPainel();
   atualizarBadge();
+  atualizarFaixa();
 }
 
 function ajustarGrade() {
@@ -1248,6 +1384,7 @@ function atualizarFaixa() {
   let msg = '';
   if (S.reconectando) msg = 'Reconectando… verifique a sua internet.';
   else if (!eAnfitria() && !S.anfitriaPresente && S.malha) msg = 'A anfitriã saiu da sala. Se ela não voltar em 3 minutos, a reunião será encerrada.';
+  else if (document.querySelector('#grid .tile.falhou')) msg = 'Não conseguimos conectar o vídeo com alguém. Tente trocar do Wi‑Fi para o 4G (ou o contrário), ou entre pelo computador. Toque em “Pessoas” para copiar um relatório.';
   f.textContent = msg;
   f.hidden = !msg;
 }
@@ -1344,11 +1481,11 @@ function ligarChamada() {
   };
   ao('#b-convite', 'click', copiarConvite);
   ao('#painel-copiar', 'click', copiarConvite);
-  ao('#som-ativar', 'click', () => {
-    $$('video').forEach((v) => v.play().catch(() => {}));
-    mostrar($('#som-faixa'), false);
-    liberarSom();
-  });
+  ao('#som-ativar', 'click', liberarSomDosVideos);
+  // se a pessoa tocar em qualquer lugar da chamada enquanto o aviso de som está aberto, também libera
+  ao('#v-call', 'click', () => { if (!$('#som-faixa').hidden) liberarSomDosVideos(); });
+  ao('#lobby-relatorio', 'click', copiarRelatorio);
+  ao('#painel-relatorio', 'click', copiarRelatorio);
   ao('#fim-voltar', 'click', () => {
     location.href = location.pathname;
   });
@@ -1378,10 +1515,16 @@ function ligarChamada() {
 // Início
 // ======================================================================
 async function iniciar() {
+  registrar('página aberta' + (navegadorEmbutido() ? ' (navegador embutido em outro app)' : ''));
   if (!suporteCompleto()) {
     ir('fim');
-    texto($('#fim-titulo'), 'Navegador não compatível');
-    texto($('#fim-texto'), 'Este navegador não consegue fazer videochamadas. Abra o link no Chrome, Edge, Firefox ou Safari atualizados.');
+    if (navegadorEmbutido()) {
+      texto($('#fim-titulo'), 'Abra no navegador do celular');
+      texto($('#fim-texto'), 'O aplicativo em que você abriu este link não permite videochamada. Toque nos três pontinhos (ou no ícone de compartilhar) e escolha “Abrir no Safari” ou “Abrir no navegador”. Também dá para copiar o link e colar no Safari ou no Chrome.');
+    } else {
+      texto($('#fim-titulo'), 'Navegador não compatível');
+      texto($('#fim-texto'), 'Este navegador não consegue fazer videochamadas. Abra o link no Chrome, Edge, Firefox ou Safari atualizados.');
+    }
     mostrar($('#fim-voltar'), false);
     return;
   }

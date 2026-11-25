@@ -41,15 +41,24 @@ class Ligacao {
     this.remTela = [];
     this.estado = 'new';
     this.timerQueda = null;
+    this.candidatos = {}; // quantos candidatos de cada tipo (host, srflx, relay) este aparelho achou
+    this.criadaEm = Date.now();
+    this.mudouEm = Date.now(); // quando o estado da conexão mudou pela última vez
 
     const pc = new RTCPeerConnection({ iceServers: malha.servidoresIce, bundlePolicy: 'max-bundle' });
     this.pc = pc;
 
     pc.onicecandidate = (ev) => {
       if (ev.candidate) {
+        const m = /\styp\s(\w+)/.exec(ev.candidate.candidate || '');
+        const tipo = ev.candidate.type || (m ? m[1] : '?');
+        this.candidatos[tipo] = (this.candidatos[tipo] || 0) + 1;
         malha.enviarSinal(id, { candidate: ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate });
       }
     };
+
+    pc.oniceconnectionstatechange = () => malha.registrar('ice(' + id + ') ' + pc.iceConnectionState);
+    pc.onicecandidateerror = (ev) => malha.registrar('erro ice(' + id + ') ' + (ev.errorCode || '') + ' ' + (ev.errorText || '') + ' ' + (ev.url || ''));
 
     pc.onnegotiationneeded = async () => {
       try {
@@ -66,6 +75,7 @@ class Ligacao {
 
     pc.ontrack = (ev) => {
       const fluxo = (ev.streams && ev.streams[0]) || new MediaStream([ev.track]);
+      malha.registrar('recebeu ' + ev.track.kind + ' de ' + id + (ev.streams && ev.streams[0] ? '' : ' (sem fluxo associado)'));
       this.fluxos.set(fluxo.id, fluxo);
       fluxo.addEventListener('removetrack', () => {
         if (!fluxo.getTracks().length) {
@@ -78,6 +88,8 @@ class Ligacao {
 
     pc.onconnectionstatechange = () => {
       this.estado = pc.connectionState;
+      this.mudouEm = Date.now();
+      malha.registrar('conexão(' + id + ') ' + pc.connectionState);
       clearTimeout(this.timerQueda);
       if (pc.connectionState === 'failed') {
         try { pc.restartIce(); } catch (e) {}
@@ -196,6 +208,7 @@ export class Malha {
     this.local = opcoes.local;
     this.aoMudar = opcoes.aoMudar || (() => {});
     this.aoEstadoLigacao = opcoes.aoEstadoLigacao || (() => {});
+    this.registrar = opcoes.registrar || (() => {});
     this.ligacoes = new Map();
   }
 
@@ -249,9 +262,54 @@ export class Malha {
     return l ? l.fluxos : new Map();
   }
 
+  // Foto do estado de cada conexão, para o relatório de suporte.
+  async relatorio() {
+    const saida = [];
+    for (const [id, l] of this.ligacoes) {
+      const o = {
+        com: id,
+        conexao: l.pc.connectionState,
+        ice: l.pc.iceConnectionState,
+        coleta: l.pc.iceGatheringState,
+        sinalizacao: l.pc.signalingState,
+        candidatosLocais: l.candidatos,
+        ha: Math.round((Date.now() - l.criadaEm) / 1000) + ' s',
+        recebido: {},
+      };
+      try {
+        const st = await l.pc.getStats();
+        const porId = {};
+        st.forEach((x) => { porId[x.id] = x; });
+        st.forEach((x) => {
+          if (x.type === 'inbound-rtp') o.recebido[x.kind] = { pacotes: x.packetsReceived, perdidos: x.packetsLost, quadrosDecodificados: x.framesDecoded };
+          if (x.type === 'candidate-pair' && x.nominated && x.state === 'succeeded') {
+            const a = porId[x.localCandidateId];
+            const b = porId[x.remoteCandidateId];
+            o.caminho = (a ? a.candidateType : '?') + ' → ' + (b ? b.candidateType : '?');
+          }
+        });
+      } catch (e) {
+        o.estatisticas = 'indisponíveis';
+      }
+      saida.push(o);
+    }
+    return saida;
+  }
+
+  // Estado real da conexão com essa pessoa (navegadores sem connectionState usam o estado do ICE).
   estado(id) {
     const l = this.ligacoes.get(id);
-    return l ? l.estado : 'new';
+    if (!l) return 'new';
+    const c = l.pc.connectionState;
+    if (c) return c;
+    const i = l.pc.iceConnectionState;
+    return i === 'completed' ? 'connected' : i;
+  }
+
+  // Há quantos milissegundos a conexão está neste estado.
+  haQuanto(id) {
+    const l = this.ligacoes.get(id);
+    return l ? Date.now() - l.mudouEm : 0;
   }
 
   fechar() {

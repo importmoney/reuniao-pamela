@@ -131,6 +131,8 @@
         <button id="lobby-entrar" class="botao primario grande" type="button">Pedir para entrar</button>
         <p id="lobby-explica" class="pequeno mudo">A anfitriã vai receber o seu pedido e permitir a sua entrada.</p>
 
+        <p class="pequeno mudo"><button id="lobby-relatorio" class="link" type="button">Está com problema? Copiar relatório para o suporte</button></p>
+
         <div id="lobby-anfitria" class="separa">
           <button id="lobby-anfitria-link" class="link" type="button">Sou a anfitriã</button>
           <form id="lobby-login" hidden autocomplete="on">
@@ -178,6 +180,10 @@
     </div>
     <h4>Na reunião</h4>
     <ul id="lista-dentro" class="lista-pessoas"></ul>
+    <div class="painel-rodape">
+      <button id="painel-relatorio" class="botao pequeno" type="button">Copiar relatório para o suporte</button>
+      <p class="pequeno mudo">Use se a imagem ou o som de alguém não aparecer. Cole o relatório numa conversa com a Pâmela.</p>
+    </div>
     <div id="painel-anfitria" class="painel-rodape" hidden>
       <label class="check"><input id="chk-trancar" type="checkbox"><span>Trancar sala<br><small class="mudo">Ninguém novo consegue pedir para entrar.</small></span></label>
       <button id="painel-copiar" class="botao pequeno" type="button">Copiar link da reunião</button>
@@ -192,7 +198,13 @@
     <button id="b-pessoas" class="b" type="button"><span class="ic"></span><span class="rot">Pessoas</span><em id="pessoas-n" hidden>0</em></button>
     <button id="b-sair" class="b sair" type="button"><span class="ic"></span><span class="rot">Sair</span></button>
   </footer>
-  <div id="som-faixa" class="som-faixa" hidden><button id="som-ativar" class="botao primario" type="button">Toque para ativar o som</button></div>
+  <div id="som-faixa" class="som-faixa" hidden>
+    <div class="som-caixa">
+      <strong>Toque na tela para ouvir</strong>
+      <span>O seu aparelho bloqueou o som até você tocar.</span>
+      <button id="som-ativar" class="botao primario grande" type="button">Ativar o som</button>
+    </div>
+  </div>
 </section>
 
 <!-- Fim -->
