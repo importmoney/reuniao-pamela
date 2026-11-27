@@ -980,6 +980,7 @@ function pararCompartilhar() {
 // ---------- gravar (anfitriã) ----------
 async function alternarGravacao() {
   if (S.gravador && S.gravador.ativo) return pararGravacao();
+  if (S.gravador && S.gravador.finalizando) return aviso('Ainda estou salvando a gravação anterior. Espere alguns segundos.');
   const sup = suporteGravacao();
   if (!sup.gravar) {
     return aviso('Este navegador não consegue gravar a reunião. Use o Chrome ou o Edge no computador.', { ms: 6000 });
@@ -987,18 +988,20 @@ async function alternarGravacao() {
   const ok = await janela('Gravar esta reunião?', [
     'Todas as pessoas serão avisadas, na hora, de que a reunião está sendo gravada. Quem entrar depois também será avisada.',
     sup.direto
-      ? 'O vídeo será salvo no seu computador, no lugar que você escolher a seguir. Nada é enviado para a internet.'
-      : 'Este navegador salva o vídeo no final, como um download. Para reuniões longas, prefira o Chrome ou o Edge no computador.',
+      ? 'O vídeo é salvo no seu computador em partes de até 500 MB, sozinho, sem parar a gravação. A seguir, escolha uma pasta (pode criar uma chamada “Gravações”) e permita que o site salve nela. Nada é enviado para a internet.'
+      : 'O vídeo é baixado em partes de até 500 MB, sozinho, sem parar a gravação. Se o navegador perguntar se pode baixar vários arquivos, permita. Para reuniões longas, prefira o Chrome ou o Edge no computador.',
   ], [
     { rotulo: 'Cancelar', valor: false },
     { rotulo: 'Começar a gravar', valor: true, primario: true },
   ]);
   if (!ok) return;
-  S.gravador = new Gravador({ titulo: S.titulo, obterCena, obterAudios });
+  S.gravador = new Gravador({ titulo: S.titulo, obterCena, obterAudios, aoParte: aoSalvarParte, limiteParte: limiteDeTeste() });
   const r = await S.gravador.iniciar();
   if (!r.ok) {
     S.gravador = null;
-    if (!r.cancelou) aviso('Não foi possível iniciar a gravação neste navegador.', { ms: 6000 });
+    if (r.cancelou) aviso('A gravação não começou: é preciso escolher uma pasta para salvar.', { ms: 7000 });
+    else if (r.erro === 'pasta') aviso('Não consegui salvar nessa pasta. Toque em Gravar de novo, escolha outra pasta e permita o acesso.', { ms: 9000 });
+    else aviso('Não foi possível iniciar a gravação neste navegador.', { ms: 6000 });
     return;
   }
   S.sig.enviar({ t: 'recording', value: true });
@@ -1010,17 +1013,41 @@ async function pararGravacao() {
   const g = S.gravador;
   if (!g || !g.ativo) return;
   const r = await g.parar();
-  S.gravador = null;
+  if (S.gravador === g) S.gravador = null;
   S.sig && S.sig.enviar({ t: 'recording', value: false });
   atualizarBadge();
-  if (r) {
+  if (r && r.partes && r.partes.length) aviso(resumoDaGravacao(r), { tipo: 'bom', ms: 15000 });
+}
+
+// Avisa a anfitriã a cada parte salva durante a gravação.
+function aoSalvarParte(p) {
+  registrar('gravação: parte ' + p.n + ' (' + Math.round(p.bytes / 1e6) + ' MB) em ' + p.onde);
+  if (p.falhou) aviso('Não consegui salvar a parte ' + p.n + ' na pasta, então ela foi baixada: veja a pasta Downloads.', { ms: 15000 });
+  else if (!p.ultima) {
     aviso(
-      r.modo === 'disco'
-        ? 'Gravação salva no seu computador: ' + r.nome
-        : 'Gravação baixada: ' + r.nome + ' (veja a pasta Downloads).',
-      { tipo: 'bom', ms: 10000 }
+      p.onde === 'disco' ? 'Parte ' + p.n + ' salva. A gravação continua.' : 'Parte ' + p.n + ' baixada (pasta Downloads). A gravação continua.',
+      { tipo: 'bom', ms: 6000 }
     );
   }
+}
+
+function resumoDaGravacao(r) {
+  const total = r.partes.length;
+  const naPasta = r.partes.filter((p) => p.onde === 'disco').length;
+  const baixadas = total - naPasta;
+  if (total === 1) {
+    return naPasta
+      ? 'Gravação salva na pasta “' + r.pasta + '”: ' + r.partes[0].nome
+      : 'Gravação baixada: ' + r.partes[0].nome + ' (veja a pasta Downloads).';
+  }
+  if (!baixadas) return 'Gravação salva em ' + total + ' partes na pasta “' + r.pasta + '”.';
+  if (!naPasta) return 'Gravação baixada em ' + total + ' partes (veja a pasta Downloads).';
+  return 'Gravação salva: ' + naPasta + ' de ' + total + ' partes na pasta “' + r.pasta + '” e ' + baixadas + ' na pasta Downloads.';
+}
+
+// Só nos testes locais: troca de arquivo com poucos KB em vez de 500 MB.
+function limiteDeTeste() {
+  return /^(localhost|127\.0\.0\.1)$/.test(location.hostname) ? window.__LIMITE_PARTE : undefined;
 }
 
 // O gravador pede a "cena" e os áudios a cada quadro/segundo.
@@ -1504,7 +1531,7 @@ function ligarChamada() {
     }
   });
   window.addEventListener('beforeunload', (ev) => {
-    if (S.gravador && S.gravador.ativo) {
+    if (S.gravador && (S.gravador.ativo || S.gravador.finalizando)) {
       ev.preventDefault();
       ev.returnValue = '';
     }

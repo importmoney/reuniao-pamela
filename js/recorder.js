@@ -5,9 +5,10 @@
 //  - o vídeo é uma "cena" desenhada num canvas (todas as câmeras ou a tela
 //    compartilhada + miniaturas), 1280x720 a 30 quadros por segundo;
 //  - o áudio de todo mundo é misturado num só (WebAudio);
-//  - o MediaRecorder grava os dois e, no Chrome/Edge do computador, escreve direto
-//    no arquivo escolhido (não ocupa a memória, aguenta reuniões longas).
-//    Nos outros navegadores o arquivo é montado na memória e baixado ao parar.
+//  - o MediaRecorder grava os dois e a gravação é salva em PARTES de até 500 MB,
+//    sem parar: cada parte é um arquivo completo, que abre sozinho;
+//  - no Chrome/Edge do computador as partes vão direto para a pasta escolhida
+//    pela anfitriã; nos outros navegadores cada parte é baixada ao ficar pronta.
 
 import { melhorGrade, inicial } from './util.js';
 
@@ -16,6 +17,11 @@ const ALTURA = 720;
 const FPS = 30;
 const FUNDO = '#1c1209';
 const GAP = 8;
+
+// A troca de arquivo começa um pouco antes dos 500 MB, porque a parte atual ainda
+// recebe o último trecho enquanto a próxima começa.
+const LIMITE_PARTE = 490 * 1000 * 1000;
+const ESPERA_NOVA_PARTE = 15000; // se a parte nova não gravar nada nesse tempo, segue na atual
 
 const TIPOS = [
   'video/mp4;codecs=avc1.640028,mp4a.40.2',
@@ -29,7 +35,7 @@ const TIPOS = [
 
 export function suporteGravacao() {
   const ok = !!(window.MediaRecorder && HTMLCanvasElement.prototype.captureStream && (window.AudioContext || window.webkitAudioContext));
-  return { gravar: ok, direto: ok && typeof window.showSaveFilePicker === 'function' };
+  return { gravar: ok, direto: ok && typeof window.showDirectoryPicker === 'function' };
 }
 
 function escolherTipo() {
@@ -45,7 +51,7 @@ function dois(n) {
   return n < 10 ? '0' + n : '' + n;
 }
 
-function nomeDoArquivo(titulo, ext) {
+function nomeBase(titulo) {
   const d = new Date();
   const data = d.getFullYear() + '-' + dois(d.getMonth() + 1) + '-' + dois(d.getDate()) + '_' + dois(d.getHours()) + 'h' + dois(d.getMinutes());
   const base = String(titulo || 'Reuniao')
@@ -54,7 +60,11 @@ function nomeDoArquivo(titulo, ext) {
     .replace(/[^A-Za-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 40) || 'Reuniao';
-  return 'Reuniao-' + base + '-' + data + '.' + ext;
+  return 'Reuniao-' + base + '-' + data;
+}
+
+function esperar(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function pronto(v) {
@@ -102,21 +112,27 @@ class LeitorDeQuadros {
 }
 
 export class Gravador {
-  // opcoes: { titulo, obterCena(): {tela, pessoas}, obterAudios(): Map<chave, MediaStream> }
+  // opcoes: { titulo, obterCena(): {tela, pessoas}, obterAudios(): Map<chave, MediaStream>,
+  //           aoParte({ n, nome, bytes, onde, falhou, ultima }), limiteParte (bytes) }
   //   tela:    { fluxo, video, nome } | null
   //   pessoas: [{ fluxo, video, nome, camLigada, micLigado }]
   //   (fluxo = MediaStream com a imagem; video = elemento <video> usado como reserva)
+  //   onde = 'disco' (pasta escolhida) ou 'download'
   constructor(opcoes) {
     this.titulo = opcoes.titulo;
     this.obterCena = opcoes.obterCena;
     this.obterAudios = opcoes.obterAudios;
+    this.aoParte = opcoes.aoParte || (() => {});
+    this.limiteParte = opcoes.limiteParte || LIMITE_PARTE;
     this.ativo = false;
-    this.bytes = 0;
+    this.finalizando = false;
     this.inicio = 0;
     this.fontes = new Map();
     this.leitores = new Map(); // id da trilha -> LeitorDeQuadros
-    this.pedacos = [];
-    this.fila = Promise.resolve();
+    this.parte = null; // parte que está sendo gravada
+    this.proxima = null; // parte nova, enquanto ainda não assumiu o lugar da atual
+    this.encerramentos = [];
+    this.salvas = [];
   }
 
   // Devolve { img, vw, vh } com o quadro mais recente daquela pessoa/tela, ou null.
@@ -157,48 +173,81 @@ export class Gravador {
     });
   }
 
-  // Precisa ser chamado direto de um clique (o navegador exige para abrir "Salvar como").
+  // Precisa ser chamado direto de um clique (o navegador exige para abrir a escolha da pasta).
   async iniciar() {
     if (this.ativo) return { ok: true };
-    const tipo = escolherTipo();
-    const ext = tipo.indexOf('mp4') >= 0 ? 'mp4' : 'webm';
-    this.tipo = tipo;
-    this.nome = nomeDoArquivo(this.titulo, ext);
-    this.escritor = null;
-    this.modo = 'download';
+    this.tipo = escolherTipo();
+    this.ext = this.tipo.indexOf('mp4') >= 0 ? 'mp4' : 'webm';
+    this.base = nomeBase(this.titulo);
+    this.pasta = null;
+    let primeiro = null;
 
-    if (typeof window.showSaveFilePicker === 'function') {
+    if (typeof window.showDirectoryPicker === 'function') {
       try {
-        const arquivo = await window.showSaveFilePicker({
-          suggestedName: this.nome,
-          types: [{ description: 'Vídeo da reunião', accept: ext === 'mp4' ? { 'video/mp4': ['.mp4'] } : { 'video/webm': ['.webm'] } }],
-        });
-        this.escritor = await arquivo.createWritable();
-        this.nome = arquivo.name || this.nome;
-        this.modo = 'disco';
+        this.pasta = await window.showDirectoryPicker({ id: 'gravacoes', mode: 'readwrite', startIn: 'documents' });
       } catch (e) {
         if (e && e.name === 'AbortError') return { ok: false, cancelou: true };
-        this.escritor = null; // cai para o modo "baixar ao final"
+        if (e && e.name === 'NotAllowedError') return { ok: false, erro: 'pasta' };
+        this.pasta = null; // o navegador não deixou abrir a escolha: cada parte vira download
+      }
+      if (this.pasta) {
+        // o 1º arquivo é criado antes de começar: se a pasta não servir, avisa já
+        try {
+          primeiro = await this.criarArquivo(1);
+        } catch (e) {
+          console.warn('pasta', e);
+          return { ok: false, erro: 'pasta' };
+        }
       }
     }
 
     try {
-      this.montar();
+      this.montar(primeiro);
     } catch (e) {
       console.warn('gravador', e);
       await this.limpar();
-      if (this.escritor) {
-        try { await this.escritor.close(); } catch (e2) {}
-        this.escritor = null;
-      }
+      if (primeiro) await this.apagarArquivo(primeiro);
       return { ok: false, erro: 'montar' };
     }
     this.ativo = true;
     this.inicio = Date.now();
-    return { ok: true, nome: this.nome, modo: this.modo, tipo: this.tipo };
+    return { ok: true, modo: this.pasta ? 'disco' : 'download', pasta: this.pasta ? this.pasta.name : null, tipo: this.tipo };
   }
 
-  montar() {
+  nomeDaParte(n, repeticao) {
+    return this.base + '-parte-' + dois(n) + (repeticao > 1 ? '-' + repeticao : '') + '.' + this.ext;
+  }
+
+  // Cria o arquivo da parte n na pasta escolhida, sem nunca escrever por cima de um que já exista.
+  async criarArquivo(n) {
+    for (let k = 1; k <= 50; k++) {
+      const nome = this.nomeDaParte(n, k);
+      try {
+        await this.pasta.getFileHandle(nome);
+        continue; // já existe
+      } catch (e) {
+        if (!e || e.name !== 'NotFoundError') throw e;
+      }
+      const arquivo = await this.pasta.getFileHandle(nome, { create: true });
+      try {
+        return { nome, escritor: await arquivo.createWritable() };
+      } catch (e) {
+        try { await this.pasta.removeEntry(nome); } catch (e2) {}
+        throw e;
+      }
+    }
+    throw new Error('sem nome livre na pasta');
+  }
+
+  // Remove um arquivo criado por nós que não chegou a ser salvo (nunca um já fechado).
+  async apagarArquivo(parte) {
+    if (!parte.escritor) return;
+    try { await parte.escritor.abort(); } catch (e) {}
+    parte.escritor = null;
+    try { await this.pasta.removeEntry(parte.nome); } catch (e) {}
+  }
+
+  montar(primeiro) {
     this.vivo = true; // enquanto falso, nenhum desenho (nem leitor de quadros) pode ser criado
     this.canvas = document.createElement('canvas');
     this.canvas.width = LARGURA;
@@ -211,19 +260,19 @@ export class Gravador {
     this.ac = new AC();
     if (this.ac.state === 'suspended') this.ac.resume();
     this.destino = this.ac.createMediaStreamDestination();
+    // Uma fonte muda sempre ligada: sem som nenhum entrando (ex.: ninguém com microfone),
+    // o Chrome não vai gravando o MP4 e a reunião se perderia.
+    try {
+      const mudo = this.ac.createConstantSource();
+      mudo.offset.value = 0;
+      mudo.connect(this.destino);
+      mudo.start();
+    } catch (e) {}
     this.sincronizarAudio();
 
     const video = this.canvas.captureStream(FPS);
     const trilhas = video.getVideoTracks().concat(this.destino.stream.getAudioTracks());
     this.saida = new MediaStream(trilhas);
-
-    const opc = { videoBitsPerSecond: 2500000, audioBitsPerSecond: 128000 };
-    if (this.tipo) opc.mimeType = this.tipo;
-    this.rec = new MediaRecorder(this.saida, opc);
-    this.rec.ondataavailable = (ev) => {
-      if (ev.data && ev.data.size) this.guardar(ev.data);
-    };
-    this.rec.onerror = (ev) => console.warn('MediaRecorder', ev);
 
     // O relógio fica num Worker: abas em segundo plano não o atrasam.
     try {
@@ -240,16 +289,149 @@ export class Gravador {
       this.podarLeitores();
     }, 1000);
     this.desenhar();
-    this.rec.start(1000);
+    this.parte = this.novaParte(1, primeiro);
   }
 
-  guardar(blob) {
-    this.bytes += blob.size;
-    if (this.escritor) {
-      this.fila = this.fila.then(() => this.escritor.write(blob)).catch((e) => console.warn('escrita', e));
-    } else {
-      this.pedacos.push(blob);
+  // ---------- partes ----------
+  // Uma parte = um MediaRecorder próprio + um arquivo próprio (por isso cada arquivo abre sozinho).
+  novaParte(n, arquivo) {
+    const opc = { videoBitsPerSecond: 2500000, audioBitsPerSecond: 128000 };
+    if (this.tipo) opc.mimeType = this.tipo;
+    const rec = new MediaRecorder(this.saida, opc);
+    const parte = {
+      n,
+      rec,
+      nome: arquivo ? arquivo.nome : this.nomeDaParte(n, 1),
+      escritor: arquivo ? arquivo.escritor : null,
+      pedacos: [], // cópia de segurança, até o arquivo ser fechado com sucesso
+      bytes: 0,
+      limite: this.limiteParte,
+      falhou: false,
+      descartada: false,
+      fila: Promise.resolve(),
+    };
+    parte.parou = new Promise((resolve) => {
+      rec.onstop = resolve;
+    });
+    rec.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size) this.guardar(parte, ev.data);
+    };
+    rec.onerror = (ev) => {
+      console.warn('MediaRecorder', ev);
+      if (parte === this.proxima) this.desistirDaProxima();
+    };
+    rec.start(1000);
+    if (this.pasta && !arquivo) {
+      // o arquivo é criado em paralelo; as escritas esperam por ele
+      parte.fila = this.criarArquivo(n).then(
+        (a) => {
+          parte.nome = a.nome;
+          parte.escritor = a.escritor;
+        },
+        (e) => {
+          console.warn('arquivo da parte ' + n, e);
+          parte.falhou = true;
+        }
+      );
     }
+    return parte;
+  }
+
+  guardar(parte, blob) {
+    if (parte.descartada) return;
+    parte.bytes += blob.size;
+    parte.pedacos.push(blob);
+    parte.fila = parte.fila.then(() => {
+      if (!parte.escritor || parte.falhou) return null;
+      return parte.escritor.write(blob).catch((e) => {
+        console.warn('escrita', e);
+        parte.falhou = true;
+      });
+    });
+    if (!this.ativo) return;
+    if (parte === this.proxima) this.assumirProxima();
+    else if (parte === this.parte && !this.proxima && parte.bytes >= parte.limite) this.prepararProxima();
+  }
+
+  // A parte nova começa ANTES de a atual parar: assim nenhum trecho se perde na troca.
+  prepararProxima() {
+    try {
+      this.proxima = this.novaParte(this.parte.n + 1);
+    } catch (e) {
+      console.warn('nova parte', e);
+      this.adiarTroca();
+      return;
+    }
+    this.esperaProxima = setTimeout(() => this.desistirDaProxima(), ESPERA_NOVA_PARTE);
+  }
+
+  // A parte nova já está gravando: agora a antiga pode parar e ser salva.
+  assumirProxima() {
+    clearTimeout(this.esperaProxima);
+    const antiga = this.parte;
+    this.parte = this.proxima;
+    this.proxima = null;
+    this.encerramentos.push(this.encerrar(antiga, false));
+  }
+
+  desistirDaProxima() {
+    const nova = this.proxima;
+    if (!nova) return;
+    clearTimeout(this.esperaProxima);
+    this.proxima = null;
+    this.adiarTroca();
+    this.encerramentos.push(this.descartar(nova));
+  }
+
+  // A troca não deu certo: continua na parte atual e tenta de novo mais adiante.
+  adiarTroca() {
+    this.parte.limite += Math.ceil(this.limiteParte / 20);
+  }
+
+  async descartar(parte) {
+    parte.descartada = true;
+    try { parte.rec.stop(); } catch (e) {}
+    await parte.fila;
+    await this.apagarArquivo(parte);
+    parte.pedacos = [];
+  }
+
+  // Para o gravador da parte e garante o arquivo: na pasta ou, se a pasta falhar, como download.
+  async encerrar(parte, ultima) {
+    try { parte.rec.stop(); } catch (e) {}
+    await Promise.race([parte.parou, esperar(4000)]);
+    await parte.fila;
+    if (!parte.bytes) return this.apagarArquivo(parte);
+
+    let onde = 'download';
+    if (parte.escritor && !parte.falhou) {
+      try {
+        await parte.escritor.close();
+        parte.escritor = null;
+        onde = 'disco';
+      } catch (e) {
+        console.warn('fechar arquivo', e);
+      }
+    }
+    if (onde === 'download') {
+      await this.apagarArquivo(parte);
+      this.baixar(parte);
+    }
+    parte.pedacos = [];
+    const info = { n: parte.n, nome: parte.nome, bytes: parte.bytes, onde, falhou: !!this.pasta && onde === 'download', ultima };
+    this.salvas.push(info);
+    this.aoParte(info);
+  }
+
+  baixar(parte) {
+    const url = URL.createObjectURL(new Blob(parte.pedacos, { type: this.tipo || 'video/webm' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = parte.nome;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5 * 60 * 1000);
   }
 
   sincronizarAudio() {
@@ -375,35 +557,22 @@ export class Gravador {
   }
 
   // ---------- parar e salvar ----------
+  // Devolve { partes: [{ n, nome, bytes, onde }], pasta, bytes, duracao }.
   async parar() {
     if (!this.ativo) return null;
     this.ativo = false;
-    const rec = this.rec;
-    const fim = new Promise((resolve) => {
-      rec.onstop = resolve;
-    });
-    try { rec.stop(); } catch (e) {}
-    await Promise.race([fim, new Promise((r) => setTimeout(r, 4000))]);
-    await this.fila;
-    await this.limpar();
-
+    this.finalizando = true;
     const duracao = Math.round((Date.now() - this.inicio) / 1000);
-    if (this.escritor) {
-      try { await this.escritor.close(); } catch (e) { console.warn('fechar arquivo', e); }
-      this.escritor = null;
-      return { nome: this.nome, bytes: this.bytes, modo: 'disco', duracao };
-    }
-    const blob = new Blob(this.pedacos, { type: this.tipo || 'video/webm' });
-    this.pedacos = [];
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = this.nome;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-    return { nome: this.nome, bytes: blob.size, modo: 'download', duracao };
+    // uma parte nova que ainda não assumiu só repete o fim da atual: é descartada
+    this.desistirDaProxima();
+    this.encerramentos.push(this.encerrar(this.parte, true));
+    const feitos = await Promise.allSettled(this.encerramentos);
+    feitos.forEach((f) => f.status === 'rejected' && console.warn('salvar parte', f.reason));
+    await this.limpar();
+    this.finalizando = false;
+
+    const partes = this.salvas.slice().sort((a, b) => a.n - b.n);
+    return { partes, pasta: this.pasta ? this.pasta.name : null, bytes: partes.reduce((t, p) => t + p.bytes, 0), duracao };
   }
 
   async limpar() {
